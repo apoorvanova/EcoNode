@@ -1,0 +1,88 @@
+/*
+  EcoNode - Wokwi simulation variant (BMP180 / Adafruit_BMP085 library)
+  Real schematic and physical design use BME280 - this substitution exists
+  purely because Wokwi's built-in parts library doesn't include a native
+  BME280. BMP180 is I2C, fixed address 0x77, temp + pressure only (no humidity).
+
+  Wokwi setup:
+    1. New project -> "ESP32-C3"
+    2. Add a "BMP180" part from the parts panel, wire:
+         VCC -> 3V3, GND -> GND, SCL -> GPIO9, SDA -> GPIO8
+    3. Library Manager -> add "Adafruit BMP085 Library"
+    4. Paste this sketch, hit play.
+*/
+
+#include <Wire.h>
+#include <Adafruit_BMP085.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#define SEA_LEVEL_HPA   (101325.0)   // Pa, not hPa - this library uses Pa
+#define SLEEP_SECONDS   600
+#define SERVICE_UUID    "0000181A-0000-1000-8000-00805F9B34FB"
+#define CHAR_UUID       "00002A6E-0000-1000-8000-00805F9B34FB"
+
+Adafruit_BMP085 bmp;
+RTC_DATA_ATTR int bootCount = 0;
+
+void advertiseReading(float tempC) {
+  BLEDevice::init("EcoNode-01");
+  BLEServer *pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  BLECharacteristic *pChar = pService->createCharacteristic(
+      CHAR_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pChar->addDescriptor(new BLE2902());
+
+  int16_t tempX100 = (int16_t)(tempC * 100);
+  pChar->setValue((uint8_t *)&tempX100, 2);
+
+  pService->start();
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->start();
+
+  Serial.println("BLE advertising started for 3s...");
+  delay(3000);
+  pAdvertising->stop();
+  BLEDevice::deinit(true);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  bootCount++;
+
+  Serial.println("=================================");
+  Serial.printf("EcoNode wake #%d\n", bootCount);
+
+  Wire.begin(8, 9);   // SDA = GPIO8, SCL = GPIO9 on ESP32-C3
+
+  if (!bmp.begin()) {   // no address arg - BMP180 is fixed at 0x77
+    Serial.println("BMP180 not found - check wiring");
+  } else {
+    float tempC    = bmp.readTemperature();
+    int32_t pressurePa = bmp.readPressure();
+    float altitude = bmp.readAltitude(SEA_LEVEL_HPA);
+
+    Serial.printf("Temp:     %.2f C\n", tempC);
+    Serial.printf("Pressure: %.2f hPa\n", pressurePa / 100.0F);
+    Serial.printf("Altitude: %.2f m\n", altitude);
+    Serial.println("(Humidity not available - BMP180 lacks a humidity sensor;");
+    Serial.println(" the real board uses BME280, which does have one.)");
+
+    advertiseReading(tempC);
+  }
+
+  Serial.printf("Sleeping for %d seconds...\n", SLEEP_SECONDS);
+  Serial.println("=================================");
+  esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL);
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // never reached - deep sleep restarts execution at setup()
+}
